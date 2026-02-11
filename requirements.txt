@@ -1,0 +1,10 @@
+google-generativeai==0.3.2
+SpeechRecognition==3.10.0
+pyttsx3==2.90
+pyaudio==0.2.11
+python-dotenv==1.0.0
+flask
+flask-session
+psycopg2-binary
+openai-whisper
+gunicorn

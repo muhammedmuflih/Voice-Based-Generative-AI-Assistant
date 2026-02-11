@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>AI Voice Assistant</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <script src="https://code.jquery.com/jquery-3.7.1.min.js"></script>
+</head>
+<body>
+
+<div class="particles" id="particles"></div>
+<div class="voice-indicator" id="voiceIndicator"><i class="fa-solid fa-microphone-lines"></i></div>
+
+<div class="main-wrapper">
+    
+    <div class="sidebar">
+        <div class="sidebar-header">
+            <h3>History</h3>
+            <button type="button" id="new-chat-btn" class="btn-new-chat">
+                <i class="fa-solid fa-plus"></i> New Chat
+            </button>
+        </div>
+        <div id="history-list" class="history-list">
+            </div>
+    </div>
+
+    <div class="container">
+        <header>
+            <h2><i class="fa-solid fa-microphone"></i> AI Voice Assistant</h2>
+            <div class="controls">
+                <button id="sound-toggle" class="btn"><i class="fa-solid fa-volume-high"></i><span>Sound ON</span></button>
+                <button onclick="setVoiceGender('male')" class="btn"><i class="fa-solid fa-mars"></i>Male</button>
+                <button onclick="setVoiceGender('female')" class="btn"><i class="fa-solid fa-venus"></i>Female</button>
+            </div>
+        </header>
+
+        <div class="chat-container">
+            <div id="chat-messages" class="chat-messages">
+                <div class="message system">
+                    <div class="message-content">
+                        <p><b>👋 Welcome!</b> Speak or type below to start.</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="typing-indicator" id="typingIndicator">
+                <div class="typing-dot"></div><div class="typing-dot"></div><div class="typing-dot"></div>
+            </div>
+
+            <div class="chat-input">
+                <input type="text" id="message-input" placeholder="Type or speak...">
+                <button id="send-btn" class="btn primary"><i class="fa-solid fa-paper-plane"></i></button>
+                <button id="voice-btn" class="btn"><i class="fa-solid fa-microphone"></i></button>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+/* =========================================================
+   INITIALIZATION & PARTICLES
+========================================================= */
+createParticles();
+
+function createParticles() {
+    const particlesContainer = document.getElementById('particles');
+    for (let i = 0; i < 30; i++) {
+        const particle = document.createElement('div');
+        particle.className = 'particle';
+        particle.style.left = Math.random() * 100 + '%';
+        particle.style.animationDelay = Math.random() * 15 + 's';
+        particlesContainer.appendChild(particle);
+    }
+}
+
+// Global Variables
+let mediaRecorder;
+let audioChunks = [];
+let micActive = false;
+let soundEnabled = true;
+let selectedVoice = null;
+const MAX_MIC_TIME = 10000; // 10 seconds max recording
+
+// Web Speech API Support Check
+let recognition;
+let isWebSpeechSupported = 'webkitSpeechRecognition' in window || 'SpeechRecognition' in window;
+
+$(document).ready(function () {
+    // Event Listeners
+    $('#send-btn').click(sendMessage);
+    $('#message-input').keypress(e => { if (e.which === 13) sendMessage(); });
+    $('#voice-btn').click(toggleMicSession);
+    $('#sound-toggle').click(toggleSound);
+    
+    // FIXED: Safe New Chat Handler
+    $('#new-chat-btn').click(function(e) {
+        e.preventDefault(); // Stop any default form submission
+        startNewChat();
+    });
+
+    // Initialize TTS Voices
+    if (speechSynthesis.onvoiceschanged !== undefined) {
+        speechSynthesis.onvoiceschanged = loadVoices;
+    }
+    loadVoices();
+    
+    // Load History on Page Load
+    loadHistoryList();
+});
+
+/* =========================================================
+   HISTORY & CHAT MANAGEMENT
+========================================================= */
+function loadHistoryList() {
+    $.get('/history', function(data) {
+        const list = $('#history-list');
+        list.empty();
+        
+        if (data.chats.length === 0) {
+            list.append('<div style="padding:10px; color:#aaa; font-size:0.9em; text-align:center;">No history yet</div>');
+            return;
+        }
+
+        data.chats.forEach(chat => {
+            const item = $(`
+                <div class="history-item" onclick="loadChat(${chat.id})">
+                    <span class="chat-title">${escapeHtml(chat.title)}</span>
+                    <i class="fa-solid fa-trash delete-chat" onclick="deleteChat(event, ${chat.id})"></i>
+                </div>
+            `);
+            list.append(item);
+        });
+    });
+}
+
+function startNewChat() {
+    $.post('/new_chat', function(res) {
+        $('#chat-messages').html('<div class="message system"><div class="message-content"><p>✨ New Chat Started!</p></div></div>');
+        loadHistoryList(); // Refresh list to remove active states if any
+    });
+}
+
+function loadChat(chatId) {
+    $.get(`/history/${chatId}`, function(data) {
+        $('#chat-messages').empty(); // Clear current view
+        
+        if (!data.messages || data.messages.length === 0) {
+            $('#chat-messages').html('<div class="message system"><div class="message-content"><p>Empty conversation.</p></div></div>');
+        } else {
+            data.messages.forEach(msg => {
+                addMessage(msg.content, msg.sender === 'user');
+            });
+        }
+    });
+}
+
+function deleteChat(e, chatId) {
+    e.stopPropagation(); // Prevent triggering the loadChat click
+    if(confirm("Delete this conversation?")) {
+        $.ajax({
+            url: `/delete_chat/${chatId}`,
+            type: 'DELETE',
+            success: function() {
+                loadHistoryList();
+                // If the user deleted the chat they are currently looking at, clear the screen
+                // Simple approach: just clear screen to be safe
+                // $('#chat-messages').html('<div class="message system"><div class="message-content"><p>Chat deleted.</p></div></div>');
+            }
+        });
+    }
+}
+
+/* =========================================================
+   MESSAGING LOGIC
+========================================================= */
+function sendMessage() {
+    const msg = $('#message-input').val().trim();
+    if (!msg) return;
+
+    addMessage(msg, true);
+    $('#message-input').val('');
+    $('#typingIndicator').addClass('active');
+
+    $.ajax({
+        url: '/chat',
+        type: 'POST',
+        contentType: 'application/json',
+        data: JSON.stringify({ message: msg }),
+        success: function (res) {
+            $('#typingIndicator').removeClass('active');
+            addMessage(res.response, false);
+            speakText(res.response);
+            loadHistoryList(); // Update sidebar in case a new chat was just created
+        },
+        error: () => {
+            $('#typingIndicator').removeClass('active');
+            addMessage("Error: Could not reach the server.", false);
+        }
+    });
+}
+
+function addMessage(text, isUser) {
+    const cls = isUser ? 'user' : 'assistant';
+    $('#chat-messages').append(`<div class="message ${cls}"><div class="message-content"><p>${escapeHtml(text)}</p></div></div>`);
+    // Auto-scroll to bottom
+    $('#chat-messages').scrollTop($('#chat-messages')[0].scrollHeight);
+}
+
+/* =========================================================
+   VOICE RECORDING (Dual Engine: Web Speech + Whisper)
+========================================================= */
+async function startMicSession() {
+    micActive = true;
+    audioChunks = [];
+
+    // 1. UI Feedback (Web Speech API)
+    if (isWebSpeechSupported) {
+        const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+        recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.interimResults = true;
+
+        recognition.onresult = (event) => {
+            let interim = '';
+            for (let i = event.resultIndex; i < event.results.length; ++i) {
+                if (event.results[i].isFinal) {
+                    $('#message-input').val(event.results[i][0].transcript);
+                } else {
+                    interim += event.results[i][0].transcript;
+                    $('#message-input').attr("placeholder", interim);
+                }
+            }
+        };
+        recognition.start();
+    }
+
+    // 2. Audio Capture (MediaRecorder for Whisper)
+    try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        mediaRecorder = new MediaRecorder(stream);
+        mediaRecorder.ondataavailable = e => { audioChunks.push(e.data); };
+        mediaRecorder.onstop = processRecordedAudio;
+        mediaRecorder.start();
+        
+        $('#voice-btn').addClass('active');
+        $('#voiceIndicator').addClass('active');
+        
+        // Safety timeout
+        setTimeout(() => { if(micActive) stopMicSession(); }, MAX_MIC_TIME);
+    } catch (err) {
+        console.error("Mic Error:", err);
+        micActive = false;
+        alert("Microphone access needed for voice mode.");
+    }
+}
+
+function stopMicSession() {
+    if (!micActive) return;
+    micActive = false;
+    
+    if (recognition) recognition.stop();
+    if (mediaRecorder && mediaRecorder.state !== "inactive") mediaRecorder.stop();
+    
+    $('#voice-btn').removeClass('active');
+    $('#voiceIndicator').removeClass('active');
+    $('#message-input').attr("placeholder", "Type or speak...");
+}
+
+function toggleMicSession() { micActive ? stopMicSession() : startMicSession(); }
+
+function processRecordedAudio() {
+    // If WebSpeech already filled the input, use text chat
+    const capturedText = $('#message-input').val().trim();
+    if (capturedText) { 
+        sendMessage(); 
+        return; 
+    }
+    
+    // Otherwise upload audio to Whisper
+    if (audioChunks.length === 0) return;
+
+    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+    const formData = new FormData();
+    formData.append('audio_data', audioBlob, 'voice.webm');
+
+    $('#typingIndicator').addClass('active');
+
+    $.ajax({
+        url: '/voice',
+        type: 'POST',
+        data: formData,
+        processData: false,
+        contentType: false,
+        success: function (res) {
+            $('#typingIndicator').removeClass('active');
+            if (res.status === 'success') {
+                addMessage(res.transcription, true);
+                addMessage(res.response, false);
+                speakText(res.response);
+                loadHistoryList();
+            }
+        },
+        error: () => {
+            $('#typingIndicator').removeClass('active');
+            addMessage("Error processing voice.", false);
+        }
+    });
+}
+
+/* =========================================================
+   TEXT-TO-SPEECH & UTILS
+========================================================= */
+function loadVoices() {
+    const voices = speechSynthesis.getVoices();
+    if (voices.length > 0 && !selectedVoice) selectedVoice = voices[0];
+}
+
+function setVoiceGender(gender) {
+    const voices = speechSynthesis.getVoices();
+    selectedVoice = voices.find(v => {
+        const n = v.name.toLowerCase();
+        return gender === 'male' ? n.includes('david') || n.includes('guy') : n.includes('zira') || n.includes('samantha');
+    }) || voices[0];
+    speakText("Voice changed.");
+}
+
+function speakText(text) {
+    if (!soundEnabled) return;
+    speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(text);
+    if (selectedVoice) utterance.voice = selectedVoice;
+    speechSynthesis.speak(utterance);
+}
+
+function toggleSound() {
+    soundEnabled = !soundEnabled;
+    const icon = soundEnabled ? 'fa-volume-high' : 'fa-volume-xmark';
+    $('#sound-toggle').html(`<i class="fa-solid ${icon}"></i><span>Sound ${soundEnabled?'ON':'OFF'}</span>`);
+    if (!soundEnabled) speechSynthesis.cancel();
+}
+
+function escapeHtml(text) {
+    if (!text) return "";
+    return text.replace(/[&<>"']/g, m => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[m]));
+}
+</script>
+</body>
+</html>
